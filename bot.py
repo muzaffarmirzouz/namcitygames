@@ -101,8 +101,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/oraliq 2026-08-01 2026-08-29 klub — oraliq, faqat Klub\n"
         "/tarix — jadvalda qilingan oxirgi o'zgartirishlar\n"
         "/yordam — yordam\n\n"
-        f"🔎 Bot har {CHECK_INTERVAL_MINUTES} daqiqada jadvalni tekshirib turadi va "
-        "kimdir avval kiritilgan summani o'zgartirsa yoki o'chirsa — darhol xabar beradi."
+        "🔎 Kimdir jadvalda avval kiritilgan summani/sanani o'zgartirsa — ZUDLIK BILAN "
+        "xabar keladi (Google Sheets skripti orqali). Butun qator o'chirilsa esa "
+        f"eng ko'pi bilan {CHECK_INTERVAL_MINUTES} daqiqa ichida xabar beradi."
     )
 
 
@@ -118,12 +119,13 @@ async def yordam(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "/tarix — jadvalda so'nggi qilingan tahrir/o'chirishlar ro'yxati\n\n"
         "`klub`/`bar` qo'shilmasa — ikkalasi ham alohida-alohida ko'rsatiladi.\n\n"
         f"Har kuni soat {REPORT_HOUR:02d}:{REPORT_MINUTE:02d} da avtomatik kunlik hisobot keladi.\n\n"
-        f"🔎 Bot har {CHECK_INTERVAL_MINUTES} daqiqada jadvalni avvalgi holati bilan solishtirib "
-        "turadi. Kimdir allaqachon kiritilgan summani/sanani/kategoriyani o'zgartirsa yoki "
-        "qatorni o'chirsa — sizga darhol xabar keladi. Hisobotlar (/bugun, /sana, /oraliq) "
-        "esa har doim jadvalning ANIQ joriy holatidan hisoblanadi, shuning uchun adashib "
-        "yozilgan summa tuzatilsa, keyingi hisobotda avtomatik to'g'ri chiqadi — eski xato "
-        "hech qachon hisobga 'yopishib' qolmaydi.",
+        "🔎 Kimdir allaqachon kiritilgan summani/sanani/bo'limni/kategoriyani o'zgartirsa — "
+        "Google Sheets'ga bog'langan skript orqali ZUDLIK BILAN (bir necha soniyada) xabar "
+        f"keladi. Butun qator o'chirilsa — bot buni eng ko'pi bilan {CHECK_INTERVAL_MINUTES} "
+        "daqiqa ichida payqab, xabar beradi (bu holatni zudkor skript ushlay olmaydi). "
+        "Hisobotlar (/bugun, /sana, /oraliq) esa har doim jadvalning ANIQ joriy holatidan "
+        "hisoblanadi, shuning uchun adashib yozilgan summa tuzatilsa, keyingi hisobotda "
+        "avtomatik to'g'ri chiqadi — eski xato hech qachon hisobga 'yopishib' qolmaydi.",
         parse_mode=ParseMode.MARKDOWN,
     )
 
@@ -223,6 +225,15 @@ async def check_changes_job(context: ContextTypes.DEFAULT_TYPE) -> None:
     Birinchi ishga tushishda (bot yangi ishga tushgan/qayta ishga tushirilgan
     bo'lsa) boshlang'ich holat sifatida saqlanadi va HECH QANDAY xabar
     yuborilmaydi — solishtirish faqat KEYINGI tekshiruvlardan boshlab ishlaydi.
+
+    ESLATMA: Summa/sana/bo'lim/kategoriya TAHRIRLANISHI haqida ZUDLIK BILAN
+    xabar endi Google Sheets'ga bog'langan Apps Script orqali yuboriladi
+    (google-apps-script.gs), chunki bu yerdan (CSV orqali) chinakam zudkor
+    xabar berish imkonsiz — "Publish to web" havolasi 1-5 daqiqa kechikadi.
+    Shu sababli bu joyda faqat QATOR BUTUNLAY O'CHIRILGAN holatlar uchun
+    xabar yuboriladi (buni Apps Script ishonchli tuta olmaydi) — tahrirlash
+    voqealari esa ikkalanib xabar bermasin deb faqat /tarix tarixiga
+    yoziladi, alohida Telegram xabari YUBORILMAYDI.
     """
     try:
         rows = fetch_rows()
@@ -248,10 +259,16 @@ async def check_changes_job(context: ContextTypes.DEFAULT_TYPE) -> None:
         history.insert(0, {"detected_at": now, "change": change})
     del history[HISTORY_LIMIT:]
 
+    # Faqat o'chirilgan qatorlar uchun Telegram xabari yuboramiz — tahrirlash
+    # haqida zudkor xabarni endi Apps Script beradi (dublikat bo'lmasligi uchun).
+    alert_changes = [c for c in changes if c["type"] == "deleted"]
+    if not alert_changes:
+        return
+
     allowed = _allowed_ids()
     if not allowed:
         return
-    text = format_change_alert(changes)
+    text = format_change_alert(alert_changes)
     for chat_id in allowed:
         try:
             await context.bot.send_message(chat_id=chat_id, text=text, parse_mode=ParseMode.MARKDOWN)

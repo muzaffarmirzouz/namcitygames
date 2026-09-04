@@ -1,11 +1,24 @@
-"""Google Sheets bilan ishlash: 'Publish to web' orqali chop etilgan CSV havoladan o'qish.
+"""Google Sheets bilan ishlash: 'Publish to web' orqali chop etilgan CSV havolalardan o'qish.
 
-Google Cloud / service account / JSON kalit KERAK EMAS — jadval "Publish to web"
-orqali CSV sifatida chop etiladi, bot esa shunchaki shu havoladan o'qiydi.
+Google Cloud / service account / JSON kalit KERAK EMAS.
 
-Jadval ustunlari: Sana | Bo'lim | Kategoriya | Kirim (so'm) | Chiqim (so'm) | Izoh | Kim kiritdi
-- Bo'lim: "Klub" yoki "Bar" (ikkalasi mustaqil, hech qachon bir-biriga qo'shilmaydi)
-- Har bir qatorda faqat bitta ustun (Kirim YOKI Chiqim) to'ldiriladi.
+MUHIM: bu — ishchi (obidxon) haqiqatda foydalanayotgan ESKI/ASOSIY jadval
+tuzilmasi (bitta "Tranzaksiyalar" varag'i emas!). Jadvalda 4 ta alohida
+varaq bor, va Bo'lim/Turi ustun orqali emas, balki QAYSI VARAQ ekanidan
+aniqlanadi:
+
+    Kirim kiritish   -> Klub, Kirim
+    Chiqim kiritish  -> Klub, Chiqim
+    Bar - Kirim      -> Bar,  Kirim
+    Bar - Chiqim     -> Bar,  Chiqim
+
+Google'ning CSV eksporti bir vaqtda faqat BITTA varaqni chiqaradi, shuning
+uchun har bir varaq ALOHIDA "Publish to web" havolasiga ega bo'lishi va
+alohida env varga yozilishi kerak (qarang: SHEET_SOURCES).
+
+Har bir varaqdagi ustunlar: Sana | Tavsif (nima uchun) | Summasi (so'm) |
+To'lov usuli | Kim kiritdi | Yuborildi. "Yuborildi" ustuni botga aloqasi
+yo'q (eski, ishlatilmaydigan ustun) — bot uni e'tiborsiz qoldiradi.
 
 Eslatma: Google'ning chop etilgan (published) versiyasi har safar darhol emas,
 odatda bir necha daqiqada yangilanadi — shuning uchun jadvalga endigina kiritilgan
@@ -18,14 +31,21 @@ from datetime import date, datetime
 
 import requests
 
-# Tranzaksiyalar varag'idagi ustunlar tartibi (shablon fayldagi bilan bir xil)
+# Har bir manba: (env var nomi, Bo'lim, Turi)
+SHEET_SOURCES = [
+    ("CSV_URL_KLUB_KIRIM", "Klub", "Kirim"),
+    ("CSV_URL_KLUB_CHIQIM", "Klub", "Chiqim"),
+    ("CSV_URL_BAR_KIRIM", "Bar", "Kirim"),
+    ("CSV_URL_BAR_CHIQIM", "Bar", "Chiqim"),
+]
+
+# Har bir varaqdagi ustunlar tartibi
 COL_SANA = 0
-COL_BOLIM = 1
-COL_KATEGORIYA = 2
-COL_KIRIM = 3
-COL_CHIQIM = 4
-COL_IZOH = 5
-COL_KIM = 6
+COL_TAVSIF = 1
+COL_SUMMASI = 2
+COL_TOLOV_USULI = 3
+COL_KIM = 4
+COL_YUBORILDI = 5
 
 KIRIM_LABEL = "Kirim"
 CHIQIM_LABEL = "Chiqim"
@@ -63,16 +83,9 @@ def _parse_amount(value):
         return 0.0
 
 
-def _parse_bolim(value):
-    s = str(value).strip().lower()
-    if s == "bar":
-        return "Bar"
-    return "Klub"  # bo'sh yoki noma'lum qiymat - standart bo'yicha Klub
-
-
-def fetch_rows():
-    """Nashr qilingan (Publish to web) CSV havoladan barcha tranzaksiya qatorlarini o'qiydi."""
-    url = os.environ["CSV_URL"]
+def _fetch_one_sheet(env_var_nomi, bolim, turi):
+    """Bitta varaqning CSV havolasini o'qib, shu varaqqa tegishli qatorlarni qaytaradi."""
+    url = os.environ[env_var_nomi]
     resp = requests.get(url, timeout=20)
     resp.raise_for_status()
     resp.encoding = "utf-8"
@@ -80,35 +93,41 @@ def fetch_rows():
     all_rows = list(reader)
 
     rows = []
-    # row_no = jadvaldagi haqiqiy qator raqami (1-qator sarlavha, shuning uchun
-    # ma'lumotlar 2-qatordan boshlanadi). Bu raqam har bir tranzaksiyaning
-    # "shaxsini" bildiradi va keyinchalik o'sha qator o'zgartirilgan/o'chirilganini
-    # aniqlash uchun ishlatiladi (qarang: tracker.py).
-    for row_no, raw in enumerate(all_rows[1:], start=2):
+    # row_no = CSV'dagi qator raqami (1-dan boshlab). Sarlavha/tavsif/bo'sh
+    # qatorlar sananing aniqlanmasligi tufayli avtomatik o'tkazib yuboriladi,
+    # shuning uchun bu yerda qat'iy qator raqamini oldindan bilish shart emas.
+    # env_var_nomi bilan birga noyob identifikator hosil qiladi — 4 ta varaqdagi
+    # bir xil raqamli qatorlar bir-biriga aralashib ketmasligi uchun (tracker.py).
+    for row_no, raw in enumerate(all_rows, start=1):
         if not raw:
             continue
-        raw = raw + [""] * (7 - len(raw))
+        raw = raw + [""] * (6 - len(raw))
         d = _parse_date(raw[COL_SANA])
         if d is None:
-            continue  # sanasi yo'q/tushunarsiz qator (bo'sh qator yoki hisobot bloki) - o'tkazib yuboramiz
-        bolim = _parse_bolim(raw[COL_BOLIM])
-        kategoriya = str(raw[COL_KATEGORIYA]).strip() or "Boshqa"
-        kirim = _parse_amount(raw[COL_KIRIM])
-        chiqim = _parse_amount(raw[COL_CHIQIM])
-        if kirim == 0 and chiqim == 0:
-            continue  # ikkalasi ham bo'sh - real tranzaksiya emas
-        izoh = str(raw[COL_IZOH]).strip()
+            continue  # sanasi yo'q/tushunarsiz qator (sarlavha, instruksiya, bo'sh qator) - o'tkazib yuboramiz
+        summasi = _parse_amount(raw[COL_SUMMASI])
+        if summasi == 0:
+            continue  # summasi yo'q - real tranzaksiya emas
+        tavsif = str(raw[COL_TAVSIF]).strip() or "Boshqa"
         kim = str(raw[COL_KIM]).strip()
         rows.append({
-            "row_no": row_no,
+            "row_no": f"{env_var_nomi}:{row_no}",
             "sana": d,
             "bolim": bolim,
-            "kategoriya": kategoriya,
-            "kirim": kirim,
-            "chiqim": chiqim,
-            "izoh": izoh,
+            "kategoriya": tavsif,
+            "kirim": summasi if turi == "Kirim" else 0.0,
+            "chiqim": summasi if turi == "Chiqim" else 0.0,
+            "izoh": "",
             "kim": kim,
         })
+    return rows
+
+
+def fetch_rows():
+    """4 ta varaqning CSV havolalarini o'qib, bitta umumiy ro'yxatga birlashtiradi."""
+    rows = []
+    for env_var_nomi, bolim, turi in SHEET_SOURCES:
+        rows.extend(_fetch_one_sheet(env_var_nomi, bolim, turi))
     return rows
 
 
